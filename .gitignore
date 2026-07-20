@@ -1,0 +1,11 @@
+.env
+*.db
+monitores.yaml
+debug_page.html
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.DS_Store

@@ -1,0 +1,44 @@
+telegram:
+  token: ${TELEGRAM_TOKEN}
+  chat_id: ${TELEGRAM_CHAT_ID}
+
+padroes:
+  intervalo_segundos: 60
+  jitter_segundos: 20
+  bloqueadas_globais: ["defeito", "peças", "sucata", "não liga", "bloqueado"]
+
+monitores:
+  - nome: "PS5 revenda"
+    ativo: true
+    fonte: olx
+    modo: requests          # requests (padrão, leve) | playwright (fallback anti-bloqueio)
+    intervalo_segundos: 60  # sobrescreve o padrão; nunca pode ser < 30
+    urls:
+      - "https://www.olx.com.br/games/consoles-de-video-game?ps=2000&pe=2500&q=playstation%205&sf=1&opst=2"
+      - "https://www.olx.com.br/games/consoles-de-video-game?ps=2500&pe=2800&q=playstation%205&sf=1&opst=2"
+    preco_max: 2800
+    bloqueadas: ["controle", "capa", "somente", "apenas o"]
+    obrigatorias_ou: ["ps5", "playstation 5"]
+    prioritarias: ["lacrado", "novo", "1tb", "nunca usado"]
+
+  - nome: "Switch 2"
+    ativo: true
+    fonte: olx
+    intervalo_segundos: 120
+    urls:
+      - "https://www.olx.com.br/games/consoles-de-video-game?q=switch%202&sf=1&opst=2"
+    preco_max: 3200
+    bloqueadas: ["joy-con", "case", "película", "jogo"]
+    obrigatorias_ou: ["switch 2"]
+    prioritarias: ["lacrado", "novo"]
+
+  - nome: "MacBook Air M2"
+    ativo: false
+    fonte: olx
+    intervalo_segundos: 600
+    urls:
+      - "https://www.olx.com.br/informatica/computadores-e-acessorios/notebooks?q=macbook%20air%20m2&sf=1&opst=2"
+    preco_max: 5000
+    bloqueadas: ["tela quebrada", "para retirada", "bateria viciada", "capa"]
+    obrigatorias_ou: ["macbook"]
+    prioritarias: ["m2", "m3", "lacrado", "ciclos"]

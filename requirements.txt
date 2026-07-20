@@ -1,0 +1,9 @@
+requests>=2.31
+PyYAML>=6.0
+python-dotenv>=1.0
+
+# Opcional: só necessário se algum monitor usar `modo: playwright`.
+# Depois de instalar, rode também: playwright install chromium
+playwright>=1.44
+
+pytest>=8.0

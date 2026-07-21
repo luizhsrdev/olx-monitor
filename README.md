@@ -76,6 +76,18 @@ commitados.
 Se `getUpdates` vier vazio, mande outra mensagem para o bot e tente de novo —
 o Telegram só retorna updates que ainda não foram "consumidos".
 
+Depois de preencher o `.env`, dá pra confirmar que token e chat_id estão
+certos sem subir o monitor de verdade:
+
+```bash
+python -m olx_monitor.test_telegram
+```
+
+Isso envia uma mensagem de anúncio fake ("[TESTE] PlayStation 5 lacrado...")
+usando o `TelegramNotifier` de verdade. Se falhar, o erro do Telegram é
+impresso direto (401 = token errado, "chat not found" = chat_id errado).
+Comando de depuração temporário — não faz parte do pipeline.
+
 ## Montando uma URL de busca da OLX
 
 1. Vá em olx.com.br, escolha a categoria e faça a busca com os filtros que

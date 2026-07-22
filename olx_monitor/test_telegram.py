@@ -49,7 +49,9 @@ def main() -> None:
 
     print(f"Enviando mensagem de teste para chat_id={chat_id}...")
     try:
-        notifier.send(anuncio_fake, monitor_nome="Teste de credenciais", prioritario=True)
+        notifier.send(
+            anuncio_fake, monitor_nome="Teste de credenciais", termos_prioritarios=["teste"]
+        )
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "?"
         detalhe = exc.response.text if exc.response is not None else str(exc)

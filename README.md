@@ -125,7 +125,9 @@ Semântica dos campos de filtro:
   termos. É o filtro mais importante: mais robusto que tentar enumerar tudo
   que deveria ser bloqueado.
 - **`prioritarias`** — não filtra nada, só marca o alerta como prioridade
-  alta (🔥 no Telegram).
+  alta (🔥 no Telegram). A mensagem mostra quais termos bateram, ex.:
+  `🔥 PRIORITÁRIO (lacrado, 1tb)` — útil pra decidir de relance qual alerta
+  atacar primeiro quando chegam vários juntos.
 - Toda comparação de texto é case-insensitive e insensível a acento
   ("peças" e "pecas" são tratados como iguais).
 - `ativo: false` desliga o monitor sem apagar a configuração.

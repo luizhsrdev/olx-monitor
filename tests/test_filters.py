@@ -114,6 +114,31 @@ def test_prioritarias_marca_flag_sem_filtrar():
     assert normal[0].aceito is True and normal[0].prioritario is False
 
 
+def test_prioritarias_registra_termo_que_bateu():
+    monitor = _monitor(prioritarias=["lacrado", "novo"])
+    resultados = aplicar_filtros([_anuncio("PS5 lacrado")], monitor, bloqueadas_globais=[])
+
+    assert resultados[0].termos_prioritarios == ["lacrado"]
+
+
+def test_prioritarias_sem_match_tem_lista_vazia():
+    monitor = _monitor(prioritarias=["lacrado"])
+    resultados = aplicar_filtros([_anuncio("PS5 usado")], monitor, bloqueadas_globais=[])
+
+    assert resultados[0].termos_prioritarios == []
+
+
+def test_prioritarias_registra_todos_os_termos_que_bateram_juntos():
+    monitor = _monitor(prioritarias=["lacrado", "1tb", "novo"])
+    resultados = aplicar_filtros(
+        [_anuncio("PS5 Digital Slim 1TB lacrado")], monitor, bloqueadas_globais=[]
+    )
+
+    assert resultados[0].aceito is True
+    assert resultados[0].prioritario is True
+    assert resultados[0].termos_prioritarios == ["lacrado", "1tb"]
+
+
 def test_ordem_das_regras_bloqueada_tem_prioridade_sobre_obrigatoria():
     monitor = _monitor(bloqueadas=["capa"], obrigatorias_ou=["ps5"])
     resultados = aplicar_filtros([_anuncio("Capa para PS5")], monitor, bloqueadas_globais=[])

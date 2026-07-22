@@ -18,8 +18,8 @@ class TelegramNotifier:
         self._chat_id = chat_id
         self._timeout_segundos = timeout_segundos
 
-    def send(self, anuncio: Anuncio, monitor_nome: str, prioritario: bool) -> None:
-        texto = self._montar_mensagem(anuncio, monitor_nome, prioritario)
+    def send(self, anuncio: Anuncio, monitor_nome: str, termos_prioritarios: list[str]) -> None:
+        texto = self._montar_mensagem(anuncio, monitor_nome, termos_prioritarios)
         resposta = requests.post(
             self._url,
             json={
@@ -33,8 +33,12 @@ class TelegramNotifier:
         resposta.raise_for_status()
 
     @staticmethod
-    def _montar_mensagem(anuncio: Anuncio, monitor_nome: str, prioritario: bool) -> str:
-        marcador = "🔥 <b>PRIORITÁRIO</b>" if prioritario else "🔔 Novo anúncio"
+    def _montar_mensagem(anuncio: Anuncio, monitor_nome: str, termos_prioritarios: list[str]) -> str:
+        if termos_prioritarios:
+            termos_escapados = ", ".join(html.escape(t) for t in termos_prioritarios)
+            marcador = f"🔥 <b>PRIORITÁRIO</b> ({termos_escapados})"
+        else:
+            marcador = "🔔 Novo anúncio"
         titulo = html.escape(anuncio.titulo)
         preco = _formatar_preco_brl(anuncio.preco)
         local = html.escape(anuncio.local) if anuncio.local else "local não informado"

@@ -24,3 +24,11 @@ def contains_any(texto_normalizado: str, termos: list[str]) -> str | None:
         if normalize_text(termo) in texto_normalizado:
             return termo
     return None
+
+
+def contains_all(texto_normalizado: str, termos: list[str]) -> list[str]:
+    """Retorna todos os termos de `termos` presentes em `texto_normalizado`,
+    na ordem em que aparecem em `termos` (não na ordem em que aparecem no
+    texto). Lista vazia = nenhum termo bateu.
+    """
+    return [termo for termo in termos if normalize_text(termo) in texto_normalizado]

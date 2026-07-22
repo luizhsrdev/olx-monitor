@@ -88,7 +88,9 @@ class MonitorRunner:
 
         resultados = aplicar_filtros(coletados, self._monitor, self._bloqueadas_globais)
         aceitos = [r.anuncio for r in resultados if r.aceito]
-        prioridade_por_id = {r.anuncio.id: r.prioritario for r in resultados if r.aceito}
+        termos_prioritarios_por_id = {
+            r.anuncio.id: r.termos_prioritarios for r in resultados if r.aceito
+        }
 
         motivos_descarte: dict[str, int] = {}
         for r in resultados:
@@ -110,7 +112,9 @@ class MonitorRunner:
             for anuncio in novos:
                 try:
                     self._notifier.send(
-                        anuncio, self._monitor.nome, prioridade_por_id.get(anuncio.id, False)
+                        anuncio,
+                        self._monitor.nome,
+                        termos_prioritarios_por_id.get(anuncio.id, []),
                     )
                     notificados += 1
                 except Exception:

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .config import MonitorConfig
 from .models import Anuncio
-from .text_utils import contains_any, normalize_text
+from .text_utils import contains_all, contains_any, normalize_text
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,7 @@ class ResultadoFiltro:
     anuncio: Anuncio
     motivo: str | None = None
     prioritario: bool = False
+    termos_prioritarios: list[str] = field(default_factory=list)
 
 
 def aplicar_filtros(
@@ -62,7 +63,9 @@ def aplicar_filtros(
             )
             continue
 
-        prioritario = contains_any(titulo_normalizado, monitor.prioritarias) is not None
-        resultados.append(ResultadoFiltro(True, anuncio, None, prioritario))
+        termos_prioritarios = contains_all(titulo_normalizado, monitor.prioritarias)
+        resultados.append(
+            ResultadoFiltro(True, anuncio, None, bool(termos_prioritarios), termos_prioritarios)
+        )
 
     return resultados

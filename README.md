@@ -139,6 +139,34 @@ Na primeira rodada de um monitor novo (banco ainda sem registro para aquele
 `nome`), o monitor só popula o SQLite e não notifica nada — assim você não
 leva uma enxurrada de alertas de anúncios antigos.
 
+## Painel de edição (Streamlit)
+
+Se editar `monitores.yaml` na mão for atrito demais, tem um painel local:
+
+```bash
+streamlit run app.py
+```
+
+Abre em `http://localhost:8501`. Deixa listar monitores (com toggle de
+ativo/inativo direto na lista), criar, editar e remover (com confirmação)
+sem precisar saber sintaxe YAML. É **só** uma ferramenta de conveniência
+local — não roda o monitoramento nem interage com o `run.py` de forma
+alguma, e não tem autenticação (não deveria ser exposto além do
+`localhost`).
+
+Duas coisas a saber:
+
+- Cada salvamento **reescreve `monitores.yaml` inteiro** — os dados de
+  monitores não tocados são preservados, mas comentários/formatação
+  manuais que você tenha adicionado ao arquivo real são perdidos. Os
+  comentários explicando cada campo continuam intactos em
+  `monitores.yaml.example`, que o painel nunca toca.
+- Os placeholders `${TELEGRAM_TOKEN}` / `${TELEGRAM_CHAT_ID}` do bloco
+  `telegram:` nunca são resolvidos pelo painel (ele lê o YAML cru, sem
+  substituição de variável de ambiente), então voltam pro arquivo
+  exatamente como estavam — o painel não edita esse bloco de qualquer
+  forma.
+
 ## Rodando
 
 ```bash

@@ -7,3 +7,7 @@ python-dotenv>=1.0
 playwright>=1.44
 
 pytest>=8.0
+
+# Opcional: só necessário para o painel local de edição (app.py).
+# Rode com: streamlit run app.py
+streamlit>=1.35

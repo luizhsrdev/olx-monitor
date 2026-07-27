@@ -48,7 +48,7 @@ def main() -> None:
 
     print(f"Enviando mensagem de teste para chat_id={chat_id}...")
     try:
-        notifier.send(
+        message_id = notifier.send(
             anuncio_fake, monitor_nome="Teste de credenciais", termos_prioritarios=["teste"]
         )
     except TelegramSendError as exc:
@@ -59,7 +59,12 @@ def main() -> None:
         )
         raise SystemExit(1) from exc
 
-    print("Mensagem enviada. Confira o Telegram.")
+    print(f"Mensagem enviada (message_id={message_id}). Confira o Telegram.")
+    print(
+        "Ela vai ficar mostrando '⏳ Buscando dados do vendedor...' pra sempre — "
+        "esse teste não passa pelo worker de enriquecimento real (rode `python run.py` "
+        "pra ver o fluxo completo de notificação + atualização)."
+    )
 
 
 if __name__ == "__main__":

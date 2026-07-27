@@ -9,6 +9,7 @@ from typing import Callable
 from .alerts.base import Notifier
 from .config import MonitorConfig
 from .dedupe import Store
+from .enrichment import SellerEnricher
 from .filters import aplicar_filtros
 from .models import Anuncio
 from .normalize import normalize
@@ -28,7 +29,12 @@ class MonitorRunner:
     """Executa o loop coleta -> normaliza -> filtra -> dedupe -> alerta
     de um único monitor. Cada instância roda na sua própria thread, com
     seu próprio intervalo — um monitor lento nunca atrasa um rápido, e
-    uma falha aqui nunca derruba os outros monitores nem o processo."""
+    uma falha aqui nunca derruba os outros monitores nem o processo.
+
+    A notificação em si (`notifier.send`) é rápida — o enriquecimento
+    com dados do vendedor acontece à parte, no worker global
+    `SellerEnricher`, pra não atrasar nem essa notificação nem o
+    próximo ciclo deste monitor."""
 
     def __init__(
         self,
@@ -38,6 +44,7 @@ class MonitorRunner:
         store: Store,
         bloqueadas_globais: list[str],
         stop_event: threading.Event,
+        enricher: SellerEnricher,
     ):
         self._monitor = monitor
         self._source = source
@@ -45,6 +52,7 @@ class MonitorRunner:
         self._store = store
         self._bloqueadas_globais = bloqueadas_globais
         self._stop_event = stop_event
+        self._enricher = enricher
         self._backoff_segundos = _BACKOFF_INICIAL_SEGUNDOS
 
     def run_forever(self) -> None:
@@ -56,37 +64,58 @@ class MonitorRunner:
             len(self._monitor.urls),
             self._monitor.modo,
         )
-        while not self._stop_event.is_set():
-            # _esperar_intervalo() fica dentro do try de propósito: uma
-            # falha isolada aqui (por mais improvável que seja) não pode
-            # matar a thread do monitor pra sempre — é thread, não
-            # processo, e o Restart=always do systemd não alcança isso.
-            try:
-                self._executar_ciclo()
-                self._backoff_segundos = _BACKOFF_INICIAL_SEGUNDOS
-                self._esperar_intervalo()
-            except Exception:
-                logger.exception(
-                    "monitor '%s': falha no ciclo, aplicando backoff de %ss",
-                    self._monitor.nome,
-                    self._backoff_segundos,
-                )
-                self._esperar(self._backoff_segundos)
-                self._backoff_segundos = min(self._backoff_segundos * 2, _BACKOFF_MAXIMO_SEGUNDOS)
+        try:
+            while not self._stop_event.is_set():
+                # _esperar_intervalo() fica dentro do try de propósito:
+                # uma falha isolada aqui (por mais improvável que seja)
+                # não pode matar a thread do monitor pra sempre — é
+                # thread, não processo, e o Restart=always do systemd
+                # não alcança isso.
+                try:
+                    self._executar_ciclo()
+                    self._backoff_segundos = _BACKOFF_INICIAL_SEGUNDOS
+                    self._esperar_intervalo()
+                except Exception:
+                    logger.exception(
+                        "monitor '%s': falha no ciclo, aplicando backoff de %ss",
+                        self._monitor.nome,
+                        self._backoff_segundos,
+                    )
+                    self._esperar(self._backoff_segundos)
+                    self._backoff_segundos = min(
+                        self._backoff_segundos * 2, _BACKOFF_MAXIMO_SEGUNDOS
+                    )
+        finally:
+            fechar = getattr(self._source, "close", None)
+            if fechar is not None:
+                try:
+                    fechar()
+                except Exception:
+                    logger.warning(
+                        "monitor '%s': erro ao fechar a fonte", self._monitor.nome, exc_info=True
+                    )
 
     def _executar_ciclo(self) -> None:
+        coletar_varias = getattr(self._source, "collect_many", None)
+        if coletar_varias is not None:
+            brutos = coletar_varias(self._monitor.urls)
+        else:
+            brutos = []
+            for indice, url in enumerate(self._monitor.urls):
+                brutos.extend(self._source.collect(url))
+                if indice < len(self._monitor.urls) - 1:
+                    self._esperar(
+                        random.uniform(
+                            _PAUSA_MIN_ENTRE_URLS_SEGUNDOS, _PAUSA_MAX_ENTRE_URLS_SEGUNDOS
+                        )
+                    )
+
+        agora = datetime.now(timezone.utc)
         coletados: list[Anuncio] = []
-        for indice, url in enumerate(self._monitor.urls):
-            brutos = self._source.collect(url)
-            agora = datetime.now(timezone.utc)
-            for bruto in brutos:
-                anuncio = normalize(self._monitor.fonte, bruto, agora)
-                if anuncio is not None:
-                    coletados.append(anuncio)
-            if indice < len(self._monitor.urls) - 1:
-                self._esperar(
-                    random.uniform(_PAUSA_MIN_ENTRE_URLS_SEGUNDOS, _PAUSA_MAX_ENTRE_URLS_SEGUNDOS)
-                )
+        for bruto in brutos:
+            anuncio = normalize(self._monitor.fonte, bruto, agora)
+            if anuncio is not None:
+                coletados.append(anuncio)
 
         resultados = aplicar_filtros(coletados, self._monitor, self._bloqueadas_globais)
         aceitos = [r.anuncio for r in resultados if r.aceito]
@@ -112,12 +141,9 @@ class MonitorRunner:
             )
         else:
             for anuncio in novos:
+                termos = termos_prioritarios_por_id.get(anuncio.id, [])
                 try:
-                    self._notifier.send(
-                        anuncio,
-                        self._monitor.nome,
-                        termos_prioritarios_por_id.get(anuncio.id, []),
-                    )
+                    message_id = self._notifier.send(anuncio, self._monitor.nome, termos)
                     notificados += 1
                 except Exception:
                     logger.exception(
@@ -125,6 +151,14 @@ class MonitorRunner:
                         self._monitor.nome,
                         anuncio.id,
                     )
+                    continue
+
+                # Enriquecimento com dados do vendedor acontece à parte
+                # (worker global) — não atrasa nem essa notificação nem
+                # o próximo ciclo deste monitor. Canal sem suporte a
+                # edição (message_id None) simplesmente não enriquece.
+                if message_id is not None:
+                    self._enricher.enqueue(anuncio, self._monitor.nome, termos, message_id, self._notifier)
 
         logger.info(
             "monitor '%s': coletados=%d aceitos=%d descartados=%d (%s) novos=%d notificados=%d",
@@ -152,6 +186,7 @@ def iniciar_monitores(
     store: Store,
     bloqueadas_globais: list[str],
     stop_event: threading.Event,
+    enricher: SellerEnricher,
 ) -> list[threading.Thread]:
     """Sobe uma thread daemon por monitor ativo e retorna as threads
     iniciadas (monitores com ativo=false são pulados)."""
@@ -161,7 +196,7 @@ def iniciar_monitores(
             logger.info("monitor '%s': ativo=false, ignorando", monitor.nome)
             continue
         source = fabricar_source(monitor)
-        runner = MonitorRunner(monitor, source, notifier, store, bloqueadas_globais, stop_event)
+        runner = MonitorRunner(monitor, source, notifier, store, bloqueadas_globais, stop_event, enricher)
         thread = threading.Thread(
             target=runner.run_forever, name=f"monitor-{monitor.nome}", daemon=True
         )

@@ -18,12 +18,17 @@ BUSCA (config) → COLETA → NORMALIZAÇÃO → FILTRO → DEDUPE → ALERTA
 
 | Estágio | Módulo | Responsabilidade |
 |---|---|---|
-| Coleta | `olx_monitor/sources/olx.py` | Baixa a busca da OLX e devolve anúncios crus |
+| Coleta | `olx_monitor/sources/olx.py` | Baixa a busca da OLX (browser persistente + circuit breaker) e devolve anúncios crus |
 | Normalização | `olx_monitor/normalize.py` | Converte o formato cru de cada fonte em `Anuncio` |
 | Filtro | `olx_monitor/filters.py` | Aplica `bloqueadas` / `obrigatorias_ou` / `preco_max` / `prioritarias` |
 | Dedupe | `olx_monitor/dedupe.py` | SQLite — nunca notifica o mesmo anúncio duas vezes |
-| Alerta | `olx_monitor/alerts/telegram.py` | Envia a mensagem no Telegram |
+| Alerta | `olx_monitor/alerts/telegram.py` | Envia a notificação (rápido) e depois edita com dados do vendedor |
+| Enriquecimento | `olx_monitor/enrichment.py` + `seller_info.py` | Worker em background que busca dados do vendedor sem atrasar a notificação |
 | Orquestração | `olx_monitor/scheduler.py` | Uma thread por monitor, com seu próprio intervalo |
+
+`olx_monitor/rsc.py` é um utilitário compartilhado (decodifica o formato de
+streaming RSC da OLX) usado tanto pela coleta quanto pelo enriquecimento —
+não é um estágio do pipeline em si.
 
 Fonte e canal de alerta são interfaces (`sources/base.py`, `alerts/base.py`).
 Hoje só existe o adaptador OLX e o canal Telegram — Mercado Livre, Discord etc.
@@ -127,7 +132,9 @@ Semântica dos campos de filtro:
 - **`prioritarias`** — não filtra nada, só marca o alerta como prioridade
   alta (🔥 no Telegram). A mensagem mostra quais termos bateram, ex.:
   `🔥 PRIORITÁRIO (lacrado, 1tb)` — útil pra decidir de relance qual alerta
-  atacar primeiro quando chegam vários juntos.
+  atacar primeiro quando chegam vários juntos. A notificação sai na hora,
+  sem dados do vendedor (ver seção "Dados do vendedor" abaixo) — eles chegam
+  editando a mesma mensagem alguns segundos depois.
 - Toda comparação de texto é case-insensitive e insensível a acento
   ("peças" e "pecas" são tratados como iguais).
 - `ativo: false` desliga o monitor sem apagar a configuração.
@@ -206,15 +213,88 @@ python run.py --config monitores.yaml --db olx_monitor.db --log-level INFO
 O serviço já vem com `Restart=always` — se o processo cair por qualquer
 motivo, o systemd sobe de novo.
 
+## Performance: browser persistente e circuit breaker
+
+Duas otimizações de latência no estágio de coleta (`sources/olx.py`):
+
+- **Browser Playwright persistente.** Antes, cada chamada em `modo:
+  playwright` (ou cada fallback a partir de `modo: requests` bloqueado)
+  lançava um Chromium do zero — 2-5s de startup por chamada, multiplicado
+  pelo número de URLs de cada monitor. Agora `OlxSource` mantém um
+  browser/context vivo entre ciclos; abrir uma `page` nova nesse context já
+  existente é quase instantâneo. O browser só é relançado depois de crash
+  (detectado automaticamente) ou após 50 páginas abertas, pra não deixar o
+  processo do Chromium acumular memória indefinidamente. Cada `OlxSource` é
+  exclusiva de uma thread (um monitor, ou o worker de enriquecimento) — a
+  API síncrona do Playwright não é thread-safe entre threads diferentes, e
+  é por isso que cada monitor tem seu próprio browser, não um pool
+  compartilhado.
+- **Circuit breaker por domínio.** Se o modo `requests` falha
+  consistentemente (a Cloudflare bloqueando de forma persistente, por
+  exemplo), não faz sentido pagar ~2-3s de timeout/bloqueio em toda
+  tentativa antes de cair pro Playwright. Depois de 3 falhas consecutivas
+  num domínio, `OlxSource` pula direto pro Playwright nas tentativas
+  seguintes. O circuito reabre sozinho depois de 30 minutos, pra reavaliar
+  se o `requests` voltou a funcionar (a proteção pode relaxar, ou o
+  ambiente de deploy pode se comportar diferente do de desenvolvimento).
+
+Um monitor com mais de uma URL busca todas em paralelo quando elas resolvem
+via `modo: requests` (`OlxSource.collect_many`, usada automaticamente pelo
+scheduler) — `requests` é thread-safe pra isso. URLs que caem no fallback
+Playwright continuam sequenciais, na mesma thread do monitor: paralelizar
+esse caminho exigiria abrir mão do browser persistente (ver acima).
+
+## Dados do vendedor (enriquecimento assíncrono)
+
+Depois que um anúncio novo passa nos filtros e é notificado, o monitor
+**não espera** buscar dados do vendedor antes de avisar — isso adicionaria
+segundos por anúncio bem na janela em que ele pode ser vendido pra outra
+pessoa. Em vez disso:
+
+1. A notificação sai imediatamente, com um `⏳ Buscando dados do
+   vendedor...` no final.
+2. Em background, um worker global (`enrichment.py` — uma fila + uma thread
+   + um browser Playwright dedicado, compartilhados entre todos os
+   monitores) busca a página individual do anúncio e extrai nome, tempo de
+   conta, verificações (e-mail/telefone/identidade/Facebook) e avaliações
+   (`seller_info.py`).
+3. A mesma mensagem é **editada** (`editMessageText`) com os dados, ou com
+   "👤 Dados do vendedor indisponíveis" se a busca falhar ou não achar nada.
+   Isso nunca derruba nada nem propaga exceção — a notificação original já
+   é válida e completa sem esse enriquecimento.
+
+Esse worker é global (não um por monitor, não a thread do próprio monitor)
+de propósito: o browser persistente de cada monitor só pode ser usado pela
+thread que o criou, então enriquecer na mesma thread atrasaria o próximo
+ciclo de coleta daquele monitor. Um worker único com seu próprio browser
+resolve isso sem multiplicar o número de browsers abertos.
+
+**Aviso de confiabilidade:** diferente do parser de listagem (validado
+contra uma amostra real da OLX), a extração de `seller_info.py` **não foi
+verificada contra uma página de anúncio real** — foi escrita de forma
+defensiva (múltiplos nomes de chave candidatos, scanner recursivo por
+pontuação) com base só na descrição da estrutura visual da página, sem
+acesso a uma amostra ao vivo durante o desenvolvimento. Se as notificações
+nunca ganharem o bloco de dados do vendedor, é sinal de que a heurística não
+está batendo com a estrutura real. Nesse caso, o worker salva um
+`debug_seller.html` (mesmo esquema do parser de listagem — ver seção
+abaixo) na primeira falha de extração; inspecione esse arquivo, ache o id
+de um vendedor visível na tela, veja que chaves o objeto usa de verdade, e
+ajuste as tuplas `_CHAVES_*`/`_MAPA_VERIFICACOES` em `seller_info.py`.
+
 ## Testes
 
 ```bash
 pytest
 ```
 
-Cobrem a camada de filtro (`tests/test_filters.py`) e o parser de
-normalização da OLX (`tests/test_normalize_olx.py`) — são as duas partes com
-lógica de negócio real. Chamadas de rede não são testadas.
+Cobrem a camada de filtro (`tests/test_filters.py`), o parser de
+normalização/RSC da OLX (`tests/test_normalize_olx.py`), o circuit breaker
+(`tests/test_circuit_breaker.py`), o dedupe (`tests/test_dedupe.py`), o
+parser de dados do vendedor (`tests/test_seller_info.py`) e o formato das
+mensagens do Telegram, incluindo o fluxo send/update
+(`tests/test_telegram_message.py`) — as partes com lógica de negócio real.
+Chamadas de rede/browser não são testadas.
 
 ## Aviso sobre a estrutura da página da OLX
 

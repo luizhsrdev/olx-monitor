@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from olx_monitor.alerts.telegram import TelegramNotifier
 from olx_monitor.config import AppConfig, ConfigError, MonitorConfig, load_config
 from olx_monitor.dedupe import Store
+from olx_monitor.enrichment import SellerEnricher
 from olx_monitor.logging_setup import configurar_logging
 from olx_monitor.scheduler import iniciar_monitores
 from olx_monitor.sources.base import Source
@@ -58,6 +59,14 @@ def main() -> None:
         logger.info("Limpeza do banco: %d registro(s) antigo(s) removido(s).", removidos)
 
     notifier = TelegramNotifier(config.telegram.token, config.telegram.chat_id)
+
+    # Worker global de enriquecimento (dados do vendedor) — uma fila +
+    # uma thread + um browser Playwright dedicado, compartilhados entre
+    # todos os monitores. Ver enrichment.py para o porquê de não ser
+    # por-monitor nem na própria thread do monitor.
+    enricher = SellerEnricher()
+    enricher.start()
+
     stop_event = threading.Event()
 
     def _handle_signal(signum: int, frame: FrameType | None) -> None:
@@ -68,10 +77,17 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _handle_signal)
 
     threads = iniciar_monitores(
-        config.monitores, _fabricar_source, notifier, store, config.bloqueadas_globais, stop_event
+        config.monitores,
+        _fabricar_source,
+        notifier,
+        store,
+        config.bloqueadas_globais,
+        stop_event,
+        enricher,
     )
     if not threads:
         logger.warning("Nenhum monitor ativo em %s. Encerrando.", args.config)
+        enricher.stop()
         store.close()
         return
 
@@ -89,6 +105,9 @@ def main() -> None:
                     thread.name,
                     _JOIN_TIMEOUT_SEGUNDOS,
                 )
+        # Drena o que sobrou na fila de enriquecimento (até o timeout
+        # dele) e fecha o browser dedicado do worker.
+        enricher.stop()
         # só fecha o banco depois que (o quanto possível) nenhuma thread
         # de monitor ainda está usando a conexão — Store.close() por si
         # só serializa contra escritas em andamento, mas sem dar essa

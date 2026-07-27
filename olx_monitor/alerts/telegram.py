@@ -10,6 +10,17 @@ from ..models import Anuncio
 logger = logging.getLogger(__name__)
 
 
+class TelegramSendError(Exception):
+    """Erro ao enviar/editar mensagem via Telegram.
+
+    Mensagem sempre sanitizada (status HTTP + corpo da resposta do
+    Telegram) — nunca a exceção crua do `requests`, que inclui a URL
+    completa da requisição. Como o token do bot fica embutido nessa URL
+    (`.../bot<token>/sendMessage`), deixar a exceção original vazar até
+    um `logger.exception()` gravaria o token em texto claro no log.
+    """
+
+
 class TelegramNotifier:
     """Envia alertas via API HTTP do Bot do Telegram (sendMessage)."""
 
@@ -20,17 +31,23 @@ class TelegramNotifier:
 
     def send(self, anuncio: Anuncio, monitor_nome: str, termos_prioritarios: list[str]) -> None:
         texto = self._montar_mensagem(anuncio, monitor_nome, termos_prioritarios)
-        resposta = requests.post(
-            self._url,
-            json={
-                "chat_id": self._chat_id,
-                "text": texto,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": False,
-            },
-            timeout=self._timeout_segundos,
-        )
-        resposta.raise_for_status()
+        try:
+            resposta = requests.post(
+                self._url,
+                json={
+                    "chat_id": self._chat_id,
+                    "text": texto,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": False,
+                },
+                timeout=self._timeout_segundos,
+            )
+            resposta.raise_for_status()
+        except requests.RequestException as exc:
+            # `from None` suprime o encadeamento: a exceção original do
+            # `requests` (que contém a URL/token em str(exc)) nunca deve
+            # aparecer num traceback logado.
+            raise TelegramSendError(_mensagem_erro_sanitizada(exc)) from None
 
     @staticmethod
     def _montar_mensagem(anuncio: Anuncio, monitor_nome: str, termos_prioritarios: list[str]) -> str:
@@ -52,6 +69,18 @@ class TelegramNotifier:
             f"🔎 Monitor: {monitor_escapado}\n"
             f'<a href="{anuncio.url}">Ver anúncio</a>'
         )
+
+
+def _mensagem_erro_sanitizada(exc: requests.RequestException) -> str:
+    """Constrói uma mensagem de erro segura a partir de uma exceção do
+    `requests` — nunca inclui a URL da requisição (que carrega o token
+    do bot). Usa o corpo da resposta do Telegram quando disponível, que
+    é só JSON de erro (`{"ok":false,"description":...}`), nunca o token
+    de volta."""
+    resposta = getattr(exc, "response", None)
+    if resposta is not None:
+        return f"HTTP {resposta.status_code}: {resposta.text}"
+    return f"{type(exc).__name__}: sem resposta do servidor (falha de rede/timeout)"
 
 
 def _formatar_preco_brl(preco: float | None) -> str:

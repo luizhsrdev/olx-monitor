@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .models import Anuncio
@@ -74,5 +74,28 @@ class Store:
             )
             self._conexao.commit()
 
+    def limpar_antigos(self, dias: int = 90) -> int:
+        """Remove registros de anúncios vistos há mais de `dias` dias.
+
+        Sem isso, `anuncios_vistos` cresce para sempre num deploy 24/7 de
+        longo prazo — um anúncio visto uma vez nunca mais precisa ser
+        lembrado depois que ele já saiu de circulação há muito tempo.
+        Retorna quantas linhas foram removidas."""
+        limite = (datetime.now(timezone.utc) - timedelta(days=dias)).isoformat()
+        with self._lock:
+            cursor = self._conexao.execute(
+                "DELETE FROM anuncios_vistos WHERE visto_em < ?", (limite,)
+            )
+            self._conexao.commit()
+            return cursor.rowcount
+
     def close(self) -> None:
-        self._conexao.close()
+        # Adquire o lock antes de fechar: se uma thread de monitor
+        # estiver no meio de execute()/commit() nesse instante, fechar
+        # a conexão por baixo dela é acesso concorrente indefinido no
+        # nível do SQLite (pode corromper o banco, não só levantar
+        # exceção). O chamador ainda precisa garantir que as threads
+        # já pararam de gerar trabalho novo antes de chamar close() —
+        # ver thread.join() em run.py.
+        with self._lock:
+            self._conexao.close()

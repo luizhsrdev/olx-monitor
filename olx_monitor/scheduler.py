@@ -57,9 +57,14 @@ class MonitorRunner:
             self._monitor.modo,
         )
         while not self._stop_event.is_set():
+            # _esperar_intervalo() fica dentro do try de propósito: uma
+            # falha isolada aqui (por mais improvável que seja) não pode
+            # matar a thread do monitor pra sempre — é thread, não
+            # processo, e o Restart=always do systemd não alcança isso.
             try:
                 self._executar_ciclo()
                 self._backoff_segundos = _BACKOFF_INICIAL_SEGUNDOS
+                self._esperar_intervalo()
             except Exception:
                 logger.exception(
                     "monitor '%s': falha no ciclo, aplicando backoff de %ss",
@@ -68,9 +73,6 @@ class MonitorRunner:
                 )
                 self._esperar(self._backoff_segundos)
                 self._backoff_segundos = min(self._backoff_segundos * 2, _BACKOFF_MAXIMO_SEGUNDOS)
-                continue
-
-            self._esperar_intervalo()
 
     def _executar_ciclo(self) -> None:
         coletados: list[Anuncio] = []

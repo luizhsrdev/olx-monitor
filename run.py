@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import signal
 import threading
 from types import FrameType
@@ -19,22 +18,12 @@ from olx_monitor.sources.olx import OlxSource
 
 logger = logging.getLogger(__name__)
 
-
-# Toggle temporário de depuração: roda o Chromium do fallback playwright
-# com janela visível, para checar manualmente se o desafio anti-bot da
-# Cloudflare se comporta diferente com um navegador não-headless. Não é
-# uma opção de config permanente (não existe em monitores.yaml de
-# propósito) — requer um ambiente com display, então não use em deploy.
-_PLAYWRIGHT_HEADLESS = os.environ.get("OLX_MONITOR_PLAYWRIGHT_HEADLESS", "true").strip().lower() not in (
-    "0",
-    "false",
-    "no",
-)
+_JOIN_TIMEOUT_SEGUNDOS = 35
 
 
 def _fabricar_source(monitor: MonitorConfig) -> Source:
     if monitor.fonte == "olx":
-        return OlxSource(modo=monitor.modo, headless=_PLAYWRIGHT_HEADLESS)
+        return OlxSource(modo=monitor.modo)
     raise ValueError(f"Fonte não suportada: {monitor.fonte}")
 
 
@@ -64,6 +53,10 @@ def main() -> None:
         raise SystemExit(1) from exc
 
     store = Store(args.db)
+    removidos = store.limpar_antigos()
+    if removidos:
+        logger.info("Limpeza do banco: %d registro(s) antigo(s) removido(s).", removidos)
+
     notifier = TelegramNotifier(config.telegram.token, config.telegram.chat_id)
     stop_event = threading.Event()
 
@@ -87,6 +80,19 @@ def main() -> None:
         while not stop_event.is_set():
             stop_event.wait(1)
     finally:
+        logger.info("Encerrando: aguardando monitores finalizarem o ciclo atual...")
+        for thread in threads:
+            thread.join(timeout=_JOIN_TIMEOUT_SEGUNDOS)
+            if thread.is_alive():
+                logger.warning(
+                    "'%s' não finalizou em %ss, encerrando mesmo assim",
+                    thread.name,
+                    _JOIN_TIMEOUT_SEGUNDOS,
+                )
+        # só fecha o banco depois que (o quanto possível) nenhuma thread
+        # de monitor ainda está usando a conexão — Store.close() por si
+        # só serializa contra escritas em andamento, mas sem dar essa
+        # chance primeiro corríamos o risco de fechar no meio de um ciclo.
         store.close()
 
 

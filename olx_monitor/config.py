@@ -155,6 +155,10 @@ def load_config(caminho: str | Path) -> AppConfig:
             )
 
         preco_max = item.get("preco_max")
+        if preco_max is not None and float(preco_max) <= 0:
+            raise ConfigError(
+                f"Monitor '{nome}': preco_max precisa ser positivo (recebido: {preco_max})."
+            )
 
         monitores.append(
             MonitorConfig(

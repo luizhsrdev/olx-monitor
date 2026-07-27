@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from pathlib import Path
 
 import requests
 
@@ -33,10 +32,6 @@ _NEXT_F_PUSH_PATTERN = re.compile(
 _NEXT_DATA_PATTERN = re.compile(
     r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL
 )
-
-# Arquivo de dump de HTML para depuração manual (ver headless=False em
-# _fetch_playwright) — útil se a OLX voltar a mudar de formato no futuro.
-DEBUG_DUMP_PATH = Path("debug_page.html")
 
 _INDICIOS_BLOQUEIO = (
     "attention required",
@@ -227,19 +222,9 @@ class OlxSource:
 
     nome = "olx"
 
-    def __init__(
-        self,
-        modo: str = "requests",
-        timeout_segundos: int = 20,
-        headless: bool = True,
-    ):
+    def __init__(self, modo: str = "requests", timeout_segundos: int = 20):
         self.modo = modo
         self.timeout_segundos = timeout_segundos
-        # headless=False é só para depuração manual (ex.: checar se o
-        # desafio anti-bot da Cloudflare se comporta diferente com um
-        # navegador visível). Não é uma opção de config permanente — ver
-        # OLX_MONITOR_PLAYWRIGHT_HEADLESS em run.py.
-        self.headless = headless
 
     def collect(self, url: str) -> list[dict]:
         if self.modo == "playwright":
@@ -305,14 +290,8 @@ class OlxSource:
 
         timeout_ms = self.timeout_segundos * 1000
 
-        if not self.headless:
-            logger.warning(
-                "olx: rodando playwright com headless=False (modo debug manual) — "
-                "requer um ambiente com display; não use isso em deploy 24/7"
-            )
-
         with sync_playwright() as p:
-            navegador = p.chromium.launch(headless=self.headless)
+            navegador = p.chromium.launch(headless=True)
             try:
                 pagina = navegador.new_page(user_agent=USER_AGENT)
                 try:
@@ -346,15 +325,6 @@ class OlxSource:
                     )
 
                 html = pagina.content()
-
-                if not self.headless:
-                    DEBUG_DUMP_PATH.write_text(html, encoding="utf-8")
-                    logger.warning(
-                        "olx: [debug] HTML completo de %s salvo em %s (%d bytes)",
-                        url,
-                        DEBUG_DUMP_PATH.resolve(),
-                        len(html),
-                    )
             finally:
                 navegador.close()
 

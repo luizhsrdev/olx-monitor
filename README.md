@@ -179,8 +179,20 @@ python run.py --config monitores.yaml --db olx_monitor.db --log-level INFO
 
 ## Deploy 24/7 (systemd)
 
-1. Copie o projeto para o servidor, ex. `/opt/olx-monitor`, com `.venv`,
-   `.env` e `monitores.yaml` já configurados lá.
+1. Copie o **código** do projeto para o servidor, ex. `/opt/olx-monitor`
+   (`git clone` direto lá é o mais simples). **Não copie o `.venv` da sua
+   máquina de dev** — um venv Python não é portável entre plataformas
+   (ex.: Mac → Linux/VPS quebra na certa). Crie um venv novo *no servidor*
+   e instale as dependências lá:
+   ```bash
+   cd /opt/olx-monitor
+   python3 -m venv .venv
+   .venv/bin/pip install -r requirements.txt
+   .venv/bin/playwright install chromium  # só se algum monitor usar modo: playwright
+   ```
+   Depois configure `.env` e `monitores.yaml` diretamente no servidor (veja
+   "Instalação" acima) — eles nunca devem ser commitados nem copiados por
+   fora de um canal seguro.
 2. Copie o serviço de exemplo e ajuste caminhos/usuário se necessário:
    ```bash
    sudo cp systemd/olx-monitor.service /etc/systemd/system/
@@ -242,26 +254,13 @@ em `olx_monitor/normalize.py`: `listId`, `subject`, `priceValue`/`price`,
 `url` (já absoluta), `location` (string pronta, ex. `"Belém -  PA"`) e `date`
 (timestamp Unix em segundos — convertido para ISO 8601 em
 `_parse_data_publicacao`). Se a OLX mudar de novo e a extração vier vazia ou
-com campos `None`, o caminho de depuração é sempre o mesmo: gere um
-`debug_page.html` (veja abaixo), ache o id de um anúncio visível na tela e
-veja que chaves o objeto usa de verdade.
+com campos `None`, o caminho de depuração é salvar o HTML de uma página real
+(ex.: `page.content()` de um script Playwright avulso) e ver que chaves o
+objeto usa de verdade — compare com o que `_CHAVES_*` já espera.
 
 Se o bloqueio por Cloudflare for frequente com `modo: requests`, mude o
 monitor para `modo: playwright` no `monitores.yaml` — ele renderiza a página
 com Chromium headless, contornando bloqueios que dependem de execução de JS.
-
-Se for preciso inspecionar manualmente o HTML renderizado (para diagnosticar
-bloqueio ou uma futura mudança de formato), dá pra rodar com o Chromium
-visível e salvar o HTML completo em `debug_page.html`:
-
-```bash
-OLX_MONITOR_PLAYWRIGHT_HEADLESS=false python run.py
-```
-
-Isso é um toggle de depuração temporário (variável de ambiente, não existe
-em `monitores.yaml` de propósito) — requer um ambiente com display (não
-funciona numa VPS/Raspberry Pi sem X11/VNC) e não deve ser usado em deploy
-24/7.
 
 ## Não-objetivos (de propósito, ver SPEC.md)
 

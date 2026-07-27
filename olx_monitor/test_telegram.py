@@ -14,10 +14,9 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 
-import requests
 from dotenv import load_dotenv
 
-from .alerts.telegram import TelegramNotifier
+from .alerts.telegram import TelegramNotifier, TelegramSendError
 from .models import Anuncio
 
 
@@ -52,17 +51,12 @@ def main() -> None:
         notifier.send(
             anuncio_fake, monitor_nome="Teste de credenciais", termos_prioritarios=["teste"]
         )
-    except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "?"
-        detalhe = exc.response.text if exc.response is not None else str(exc)
-        print(f"Falha ao enviar (HTTP {status}): {detalhe}")
+    except TelegramSendError as exc:
+        print(f"Falha ao enviar: {exc}")
         print(
-            "Erros comuns: token errado -> 401 Unauthorized; "
+            "Erros comuns: token errado -> HTTP 401 Unauthorized; "
             "chat_id errado -> 'Bad Request: chat not found'."
         )
-        raise SystemExit(1) from exc
-    except requests.RequestException as exc:
-        print(f"Falha de rede ao enviar: {exc}")
         raise SystemExit(1) from exc
 
     print("Mensagem enviada. Confira o Telegram.")

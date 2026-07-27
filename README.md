@@ -269,18 +269,47 @@ thread que o criou, então enriquecer na mesma thread atrasaria o próximo
 ciclo de coleta daquele monitor. Um worker único com seu próprio browser
 resolve isso sem multiplicar o número de browsers abertos.
 
-**Aviso de confiabilidade:** diferente do parser de listagem (validado
-contra uma amostra real da OLX), a extração de `seller_info.py` **não foi
-verificada contra uma página de anúncio real** — foi escrita de forma
-defensiva (múltiplos nomes de chave candidatos, scanner recursivo por
-pontuação) com base só na descrição da estrutura visual da página, sem
-acesso a uma amostra ao vivo durante o desenvolvimento. Se as notificações
-nunca ganharem o bloco de dados do vendedor, é sinal de que a heurística não
-está batendo com a estrutura real. Nesse caso, o worker salva um
-`debug_seller.html` (mesmo esquema do parser de listagem — ver seção
-abaixo) na primeira falha de extração; inspecione esse arquivo, ache o id
-de um vendedor visível na tela, veja que chaves o objeto usa de verdade, e
-ajuste as tuplas `_CHAVES_*`/`_MAPA_VERIFICACOES` em `seller_info.py`.
+**A página individual de anúncio não usa RSC** — diferente da listagem,
+confirmado inspecionando um `debug_seller.html` real: zero ocorrências de
+`self.__next_f.push`. A página tem um `<script id="initial-data"
+type="text/plain" data-json="...">` com JSON estruturado dos dados do
+anúncio (preço, categoria, `user.name`), mas os dados que importam aqui —
+"Na OLX desde", verificações, avaliações — **não estão nesse JSON**: eles só
+aparecem no HTML depois que uma chamada do lado do cliente roda (o
+Playwright já espera a página renderizar, então esse conteúdo chega pronto
+no `page.content()`). Por isso `seller_info.py` extrai via regex sobre o
+HTML renderizado, não sobre RSC/JSON.
+
+Campos **confirmados** contra uma amostra real (`debug_seller.html`
+inspecionado em 2026-07):
+
+- **Nome** — `alt="Foto de <nome>"` na imagem do avatar.
+- **Membro desde** — texto literal `Na OLX desde <mês> de <ano>`.
+- **Verificações individuais** (E-mail/Telefone/Identidade/Facebook) — cada
+  item é um ícone SVG com `fill="#24A148"` (verde, verificado) ou
+  `fill="#8994A9"` (cinza, não verificado) seguido do rótulo em texto.
+- **Ausência de avaliações** — texto literal `ainda não possui avaliações`.
+
+Campos **não confirmados** (a amostra inspecionada não tinha exemplo
+positivo — best-effort, documentado no código):
+
+- **Conta verificada** (selo geral, distinto das verificações individuais)
+  — não apareceu em lugar nenhum da amostra real. `seller_info.py` só
+  reconhece o texto literal "conta verificada" se aparecer; do contrário
+  fica `None` (não `False` — "não sabemos" é diferente de "confirmado que
+  não").
+- **Formato de quando HÁ avaliações** (estrelas/nota) — a amostra
+  inspecionada não tinha nenhuma avaliação, só o caso "ausência". O padrão
+  usado (número decimal perto da palavra "avalia") é um chute razoável, não
+  uma estrutura vista de verdade.
+
+Se a OLX mudar a estrutura de novo, o worker salva um `debug_seller.html`
+automaticamente na primeira extração que não achar nada — inspecione esse
+arquivo (`grep` pelos textos "Na OLX desde"/"Informações verificadas" é o
+caminho mais rápido, como da primeira vez) e ajuste as regexes em
+`seller_info.py`. Cada campo é extraído independentemente — um campo
+faltando não invalida os outros nem impede a notificação de ser enriquecida
+parcialmente.
 
 ## Testes
 

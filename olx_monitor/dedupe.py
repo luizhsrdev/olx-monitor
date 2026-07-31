@@ -17,6 +17,17 @@ CREATE TABLE IF NOT EXISTS anuncios_vistos (
 );
 """
 
+# Tabela própria para o dedupe de cupons — deliberadamente separada de
+# anuncios_vistos (cupom não é anúncio, não tem monitor_nome/fonte, só
+# um código). Mesma conexão/lock/arquivo .db, infraestrutura reutilizada
+# sem forçar o cupom na forma do Anuncio.
+_SCHEMA_CUPONS = """
+CREATE TABLE IF NOT EXISTS cupons_vistos (
+    codigo TEXT NOT NULL PRIMARY KEY,
+    visto_em TEXT NOT NULL
+);
+"""
+
 
 class Store:
     """Camada de dedupe em SQLite. Lembra quais anúncios já foram
@@ -32,6 +43,7 @@ class Store:
         self._lock = threading.Lock()
         with self._lock:
             self._conexao.execute(_SCHEMA)
+            self._conexao.execute(_SCHEMA_CUPONS)
             self._conexao.commit()
 
     def eh_primeira_execucao(self, monitor_nome: str) -> bool:
@@ -74,20 +86,58 @@ class Store:
             )
             self._conexao.commit()
 
-    def limpar_antigos(self, dias: int = 90) -> int:
-        """Remove registros de anúncios vistos há mais de `dias` dias.
+    def eh_primeira_execucao_cupons(self) -> bool:
+        """True se nunca registramos nenhum cupom — mesma regra do
+        eh_primeira_execucao() de anúncios, aplicada à tabela própria
+        de cupons: só popula na primeira rodada, sem notificar."""
+        with self._lock:
+            cursor = self._conexao.execute("SELECT 1 FROM cupons_vistos LIMIT 1")
+            return cursor.fetchone() is None
 
-        Sem isso, `anuncios_vistos` cresce para sempre num deploy 24/7 de
-        longo prazo — um anúncio visto uma vez nunca mais precisa ser
-        lembrado depois que ele já saiu de circulação há muito tempo.
-        Retorna quantas linhas foram removidas."""
-        limite = (datetime.now(timezone.utc) - timedelta(days=dias)).isoformat()
+    def codigos_novos(self, codigos: list[str]) -> list[str]:
+        """Retorna, preservando a ordem, os códigos que ainda não estão
+        registrados. Não marca nada como visto."""
+        if not codigos:
+            return []
+        placeholders = ",".join("?" * len(codigos))
         with self._lock:
             cursor = self._conexao.execute(
-                "DELETE FROM anuncios_vistos WHERE visto_em < ?", (limite,)
+                f"SELECT codigo FROM cupons_vistos WHERE codigo IN ({placeholders})",
+                codigos,
+            )
+            vistos = {row[0] for row in cursor.fetchall()}
+        return [c for c in codigos if c not in vistos]
+
+    def marcar_codigos_vistos(self, codigos: list[str]) -> None:
+        if not codigos:
+            return
+        agora = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conexao.executemany(
+                "INSERT OR IGNORE INTO cupons_vistos (codigo, visto_em) VALUES (?, ?)",
+                [(codigo, agora) for codigo in codigos],
             )
             self._conexao.commit()
-            return cursor.rowcount
+
+    def limpar_antigos(self, dias: int = 90) -> int:
+        """Remove registros de anúncios e cupons vistos há mais de
+        `dias` dias.
+
+        Sem isso, as tabelas de dedupe crescem para sempre num deploy
+        24/7 de longo prazo — algo visto uma vez nunca mais precisa ser
+        lembrado depois que já saiu de circulação há muito tempo.
+        Retorna quantas linhas foram removidas ao todo (as duas
+        tabelas)."""
+        limite = (datetime.now(timezone.utc) - timedelta(days=dias)).isoformat()
+        with self._lock:
+            cursor_anuncios = self._conexao.execute(
+                "DELETE FROM anuncios_vistos WHERE visto_em < ?", (limite,)
+            )
+            cursor_cupons = self._conexao.execute(
+                "DELETE FROM cupons_vistos WHERE visto_em < ?", (limite,)
+            )
+            self._conexao.commit()
+            return cursor_anuncios.rowcount + cursor_cupons.rowcount
 
     def close(self) -> None:
         # Adquire o lock antes de fechar: se uma thread de monitor

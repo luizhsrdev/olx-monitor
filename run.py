@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from olx_monitor.alerts.telegram import TelegramNotifier
 from olx_monitor.config import AppConfig, ConfigError, MonitorConfig, load_config
+from olx_monitor.coupon_monitor import CouponMonitor
 from olx_monitor.dedupe import Store
 from olx_monitor.enrichment import SellerEnricher
 from olx_monitor.logging_setup import configurar_logging
@@ -85,6 +86,29 @@ def main() -> None:
         stop_event,
         enricher,
     )
+
+    # Monitor de cupons: módulo separado dos monitores de produto (não
+    # tem preço/filtro/faixa de valor), mas entra na mesma lista de
+    # threads pra herdar o shutdown/join já existente abaixo de graça.
+    if config.cupons is not None and config.cupons.ativo:
+        fonte_cupons = OlxSource(modo="requests")
+        cupom_monitor = CouponMonitor(
+            url=config.cupons.url,
+            intervalo_segundos=config.cupons.intervalo_segundos,
+            jitter_segundos=config.padroes.jitter_segundos,
+            source=fonte_cupons,
+            notifier=notifier,
+            store=store,
+            stop_event=stop_event,
+        )
+        thread_cupons = threading.Thread(
+            target=cupom_monitor.run_forever, name="monitor-cupons", daemon=True
+        )
+        thread_cupons.start()
+        threads.append(thread_cupons)
+    elif config.cupons is not None:
+        logger.info("monitor de cupons: ativo=false, ignorando")
+
     if not threads:
         logger.warning("Nenhum monitor ativo em %s. Encerrando.", args.config)
         enricher.stop()

@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import html
 import logging
+from typing import TYPE_CHECKING
 
 import requests
 
 from ..models import Anuncio
 from ..seller_info import SellerInfo
+
+if TYPE_CHECKING:
+    # import só pra tipagem estática: em runtime, coupon_monitor.py
+    # importa TelegramNotifier daqui — um import de verdade (não só
+    # sob TYPE_CHECKING) criaria um ciclo.
+    from ..coupon_monitor import Coupon
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +101,12 @@ class TelegramNotifier:
             # só loga e segue, sem retry.
             logger.warning("olx: falha ao editar mensagem %s: %s", message_id, exc)
 
+    def send_coupon(self, coupon: "Coupon") -> None:
+        """Notifica um cupom novo. Sem message_id/update — cupom não
+        tem enriquecimento posterior, é só "avisa e copia o código"."""
+        texto = _montar_mensagem_cupom(coupon)
+        self._chamar_api(self._url_send, {"text": texto})
+
     def _chamar_api(self, url: str, campos: dict) -> requests.Response:
         try:
             resposta = requests.post(
@@ -162,6 +175,20 @@ def _montar_bloco_vendedor(info: SellerInfo) -> str:
     if not linhas:
         return "👤 Dados do vendedor indisponíveis"
 
+    return "\n".join(linhas)
+
+
+def _montar_mensagem_cupom(coupon: "Coupon") -> str:
+    # <code>...</code> no Telegram (com parse_mode HTML) renderiza em
+    # monoespaçado E é tocável pra copiar direto — exatamente o que
+    # importa aqui, já que o cupom em si é pra copiar e colar.
+    linhas = ["🎟️ <b>NOVO CUPOM</b>", f"<code>{html.escape(coupon.codigo)}</code>"]
+    if coupon.titulo:
+        linhas.append(f"💸 {html.escape(coupon.titulo)}")
+    if coupon.descricao:
+        linhas.append(f"📋 {html.escape(coupon.descricao)}")
+    if coupon.validade:
+        linhas.append(f"⏰ {html.escape(coupon.validade)}")
     return "\n".join(linhas)
 
 

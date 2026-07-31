@@ -48,11 +48,19 @@ class MonitorConfig:
 
 
 @dataclass(frozen=True)
+class CuponsConfig:
+    ativo: bool
+    intervalo_segundos: int
+    url: str
+
+
+@dataclass(frozen=True)
 class AppConfig:
     telegram: TelegramConfig
     padroes: PadroesConfig
     monitores: list[MonitorConfig]
     bloqueadas_globais: list[str]
+    cupons: CuponsConfig | None
 
 
 def _substituir_env_vars(valor):
@@ -176,9 +184,28 @@ def load_config(caminho: str | Path) -> AppConfig:
             )
         )
 
+    cupons_bruto = bruto.get("cupons")
+    if cupons_bruto:
+        url_cupons = cupons_bruto.get("url")
+        if not url_cupons:
+            raise ConfigError("Seção 'cupons' precisa de 'url'.")
+        intervalo_cupons = int(cupons_bruto.get("intervalo_segundos", intervalo_padrao))
+        _validar_intervalo("cupons.intervalo_segundos", intervalo_cupons)
+        cupons = CuponsConfig(
+            ativo=bool(cupons_bruto.get("ativo", True)),
+            intervalo_segundos=intervalo_cupons,
+            url=str(url_cupons),
+        )
+    else:
+        # Seção opcional: um monitores.yaml sem 'cupons' continua
+        # válido (retrocompatível) — só significa que o monitor de
+        # cupons não é iniciado.
+        cupons = None
+
     return AppConfig(
         telegram=telegram,
         padroes=PadroesConfig(intervalo_padrao, jitter_padrao, bloqueadas_globais),
         monitores=monitores,
         bloqueadas_globais=bloqueadas_globais,
+        cupons=cupons,
     )

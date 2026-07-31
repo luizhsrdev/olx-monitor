@@ -42,3 +42,13 @@ monitores:
     bloqueadas: ["tela quebrada", "para retirada", "bateria viciada", "capa"]
     obrigatorias_ou: ["macbook"]
     prioritarias: ["m2", "m3", "lacrado", "ciclos"]
+
+# Monitor de cupons — seção própria, separada de 'monitores' (cupom não
+# tem preço/filtro/faixa de valor, então não usa os campos acima). Só
+# entra se 'ativo: true'; a seção inteira é opcional (se omitida, o
+# monitor de cupons simplesmente não inicia). Ver README, seção "Monitor
+# de cupons".
+cupons:
+  ativo: false
+  intervalo_segundos: 120
+  url: "https://www.olx.com.br/cupons"

@@ -30,6 +30,12 @@ BUSCA (config) → COLETA → NORMALIZAÇÃO → FILTRO → DEDUPE → ALERTA
 streaming RSC da OLX) usado tanto pela coleta quanto pelo enriquecimento —
 não é um estágio do pipeline em si.
 
+`olx_monitor/coupon_monitor.py` é um **pipeline paralelo, deliberadamente
+separado** — monitor de cupons de desconto, não de produto (ver seção
+"Monitor de cupons" abaixo). Reaproveita `OlxSource`/`Store`/
+`TelegramNotifier`, mas não passa pelas etapas de filtro/normalização/
+scheduler de anúncio.
+
 Fonte e canal de alerta são interfaces (`sources/base.py`, `alerts/base.py`).
 Hoje só existe o adaptador OLX e o canal Telegram — Mercado Livre, Discord etc.
 não foram implementados de propósito (ver `SPEC.md`, seção "Não-objetivos").
@@ -156,10 +162,11 @@ streamlit run app.py
 
 Abre em `http://localhost:8501`. Deixa listar monitores (com toggle de
 ativo/inativo direto na lista), criar, editar e remover (com confirmação)
-sem precisar saber sintaxe YAML. É **só** uma ferramenta de conveniência
-local — não roda o monitoramento nem interage com o `run.py` de forma
-alguma, e não tem autenticação (não deveria ser exposto além do
-`localhost`).
+sem precisar saber sintaxe YAML — e tem uma seção separada só pra
+ligar/desligar o monitor de cupons e ajustar o intervalo (sem filtros, já
+que cupom não tem). É **só** uma ferramenta de conveniência local — não
+roda o monitoramento nem interage com o `run.py` de forma alguma, e não
+tem autenticação (não deveria ser exposto além do `localhost`).
 
 Duas coisas a saber:
 
@@ -311,6 +318,64 @@ caminho mais rápido, como da primeira vez) e ajuste as regexes em
 faltando não invalida os outros nem impede a notificação de ser enriquecida
 parcialmente.
 
+## Monitor de cupons
+
+Avisa quando um cupom novo aparece em `olx.com.br/cupons`. **Módulo
+separado dos monitores de produto de propósito** (`coupon_monitor.py`):
+cupom não tem preço, palavra-chave nem faixa de valor — o que se faz com
+ele é copiar o código, não correr pra comprar. Em vez de forçar isso na
+abstração de `Anuncio`/`MonitorConfig`, o monitor de cupons reaproveita só
+a infraestrutura (`OlxSource` pra buscar a página, `Store` pra dedupe — numa
+tabela própria, `cupons_vistos`, não a de anúncios — e `TelegramNotifier`
+pra avisar), com ciclo e extração próprios.
+
+Configuração — seção `cupons:` no `monitores.yaml`, separada de
+`monitores:`, e **opcional** (se omitida, o monitor de cupons não inicia):
+
+```yaml
+cupons:
+  ativo: true
+  intervalo_segundos: 120
+  url: "https://www.olx.com.br/cupons"
+```
+
+Mesma trava de intervalo mínimo (`>= 30s`) dos monitores de produto, e
+mesma regra de primeira execução (banco vazio → só popula, não notifica).
+Dá pra ligar/desligar e ajustar o intervalo pelo painel Streamlit também
+(seção "Monitor de cupons" — sem gestão de filtro, já que cupom não tem).
+
+Mensagem no Telegram (código em bloco `<code>` — toca pra copiar):
+
+```
+🎟️ NOVO CUPOM
+OFF30
+💸 R$30 de desconto com Garantia da OLX
+📋 Válido para compras entre R$400 e R$20000 utilizando Garantia OLX
+⏰ Expira em menos de 24 horas
+```
+
+**A página de cupons usa HTML renderizado puro, não RSC** (confirmado: zero
+`self.__next_f.push` nela — diferente da listagem de anúncios). Cada cupom
+fica dentro de um `<div class="... CouponCard_wrapper__<hash>">` (hash de
+build do CSS Modules, muda só quando a OLX reimplanta o frontend — só o
+prefixo estável é usado pra extrair). Campos confirmados contra uma amostra
+real: código (`<p class="...uppercase">`), título (`<h2
+class="...CouponCard_title__...">`), descrição (`<p class="typo-caption
+undefined">` logo após o título) e validade (`<p class="typo-caption"
+color="...">` no rodapé do cartão).
+
+**Ressalva:** a amostra real inspecionada tinha só **um cupom** na página —
+a extração de campos foi validada contra dado real, mas o corte entre
+*múltiplos* `CouponCard_wrapper__` consecutivos só foi exercitado com um
+fragmento sintético (`tests/test_coupon_monitor.py`), não com um dump real
+de vários cupons. Por isso `coupon_monitor.py` salva um `debug_cupons.html`
+automaticamente sempre que a extração vier vazia ou a contagem parecer
+suspeita (algum cartão sem código, ou dois cupons com o mesmo código — sinal
+de que o corte vazou conteúdo de um pro outro). No dia que a página tiver
+vários cupons de verdade, esse arquivo permite validar o corte contra dado
+real e corrigir rápido se precisar — mesmo ciclo já usado pro `__NEXT_DATA__`
+e pros dados do vendedor.
+
 ## Testes
 
 ```bash
@@ -319,11 +384,13 @@ pytest
 
 Cobrem a camada de filtro (`tests/test_filters.py`), o parser de
 normalização/RSC da OLX (`tests/test_normalize_olx.py`), o circuit breaker
-(`tests/test_circuit_breaker.py`), o dedupe (`tests/test_dedupe.py`), o
-parser de dados do vendedor (`tests/test_seller_info.py`) e o formato das
-mensagens do Telegram, incluindo o fluxo send/update
-(`tests/test_telegram_message.py`) — as partes com lógica de negócio real.
-Chamadas de rede/browser não são testadas.
+(`tests/test_circuit_breaker.py`), o dedupe de anúncios e cupons
+(`tests/test_dedupe.py`), o parser de dados do vendedor
+(`tests/test_seller_info.py`), o parser e o ciclo do monitor de cupons
+(`tests/test_coupon_monitor.py`) e o formato das mensagens do Telegram,
+incluindo o fluxo send/update (`tests/test_telegram_message.py`) — as
+partes com lógica de negócio real. Chamadas de rede/browser não são
+testadas.
 
 ## Aviso sobre a estrutura da página da OLX
 

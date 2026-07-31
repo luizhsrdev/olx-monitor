@@ -68,6 +68,16 @@ def resumo_filtros(monitor: dict) -> str:
     return f"{n_obrig} obrigatórias, {n_bloq} bloqueadas, {n_prior} prioritárias"
 
 
+def validar_cupons(intervalo_segundos: int) -> list[str]:
+    erros = []
+    if intervalo_segundos < INTERVALO_MINIMO_SEGUNDOS:
+        erros.append(
+            f"Intervalo não pode ser menor que {INTERVALO_MINIMO_SEGUNDOS}s — "
+            "mesma regra dos monitores de produto."
+        )
+    return erros
+
+
 def validar_monitor(
     nome: str, preco_max: float | None, urls: list[str], intervalo_segundos: int
 ) -> list[str]:
@@ -310,6 +320,50 @@ def main() -> None:
 
     st.header("Criar novo monitor")
     _renderizar_formulario(st, dados, None)
+
+    _renderizar_secao_cupons(st, dados)
+
+
+def _renderizar_secao_cupons(st, dados: dict) -> None:
+    """Seção separada dos monitores de produto — cupom não tem filtro,
+    então é só ligar/desligar e ajustar o intervalo (sem formulário
+    complexo, ao contrário dos monitores de produto acima)."""
+    st.header("Monitor de cupons")
+    st.caption(
+        "Avisa quando um cupom novo aparece em olx.com.br/cupons. Sem filtro — "
+        "todo cupom novo é notificado."
+    )
+
+    cupons_dados = dados.get("cupons") or {}
+
+    with st.form("form_cupons"):
+        ativo = st.checkbox("Ativo", value=cupons_dados.get("ativo", False))
+        intervalo_segundos = st.number_input(
+            "Intervalo entre consultas (segundos)",
+            min_value=0,
+            value=int(cupons_dados.get("intervalo_segundos", 120)),
+            step=10,
+            help=f"Nunca pode ser menor que {INTERVALO_MINIMO_SEGUNDOS}s.",
+        )
+        salvar = st.form_submit_button("Salvar configuração de cupons", type="primary")
+
+    if not salvar:
+        return
+
+    erros = validar_cupons(intervalo_segundos)
+    if erros:
+        for erro in erros:
+            st.error(erro)
+        return
+
+    dados.setdefault("cupons", {})
+    dados["cupons"]["ativo"] = ativo
+    dados["cupons"]["intervalo_segundos"] = int(intervalo_segundos)
+    dados["cupons"].setdefault("url", "https://www.olx.com.br/cupons")
+
+    salvar_dados(dados)
+    st.session_state["mensagem_sucesso"] = "Configuração de cupons atualizada com sucesso."
+    st.rerun()
 
 
 if __name__ == "__main__":

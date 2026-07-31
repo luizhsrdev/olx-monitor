@@ -119,3 +119,72 @@ def test_limpar_antigos_preserva_registros_recentes(store):
 
     assert removidos == 0
     assert store.eh_primeira_execucao("Monitor A") is False
+
+
+# --- Dedupe de cupons — tabela própria (cupons_vistos), desacoplada de
+# Anuncio/Coupon: Store só lida com strings de código, quem monta o
+# Coupon é coupon_monitor.py. ------------------------------------------
+
+
+def test_cupons_primeira_execucao_true_quando_banco_vazio(store):
+    assert store.eh_primeira_execucao_cupons() is True
+
+
+def test_cupons_primeira_execucao_false_apos_marcar_vistos(store):
+    store.marcar_codigos_vistos(["OFF30"])
+
+    assert store.eh_primeira_execucao_cupons() is False
+
+
+def test_cupons_codigos_novos_exclui_ja_vistos(store):
+    store.marcar_codigos_vistos(["OFF30"])
+
+    novos = store.codigos_novos(["OFF30", "PROMO5"])
+
+    assert novos == ["PROMO5"]
+
+
+def test_cupons_codigos_novos_nao_marca_nada_sozinho(store):
+    store.codigos_novos(["OFF30"])
+
+    assert store.codigos_novos(["OFF30"]) == ["OFF30"]
+
+
+def test_cupons_codigos_novos_preserva_ordem(store):
+    store.marcar_codigos_vistos(["B"])
+
+    novos = store.codigos_novos(["A", "B", "C"])
+
+    assert novos == ["A", "C"]
+
+
+def test_cupons_marcar_codigos_vistos_e_idempotente(store):
+    store.marcar_codigos_vistos(["OFF30"])
+    store.marcar_codigos_vistos(["OFF30"])  # não deve levantar erro
+
+    assert store.codigos_novos(["OFF30"]) == []
+
+
+def test_cupons_dedupe_e_independente_do_dedupe_de_anuncios(store):
+    # Um anúncio com id igual a um código de cupom não deve interferir
+    # um no outro — tabelas completamente separadas.
+    store.marcar_vistos("Monitor A", [_anuncio("OFF30")])
+
+    assert store.codigos_novos(["OFF30"]) == ["OFF30"]
+
+
+def test_limpar_antigos_tambem_remove_cupons_expirados(store):
+    store.marcar_codigos_vistos(["OFF30"])
+
+    antigo = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
+    with store._lock:
+        store._conexao.execute(
+            "UPDATE cupons_vistos SET visto_em = ? WHERE codigo = 'OFF30'",
+            (antigo,),
+        )
+        store._conexao.commit()
+
+    removidos = store.limpar_antigos(dias=90)
+
+    assert removidos == 1
+    assert store.eh_primeira_execucao_cupons() is True

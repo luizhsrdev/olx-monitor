@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from olx_monitor.alerts.telegram import TelegramNotifier
 from olx_monitor.config import AppConfig, ConfigError, MonitorConfig, load_config
-from olx_monitor.coupon_monitor import CouponMonitor
+from olx_monitor.coupon_monitor import CouponMonitor, LatestCouponCache
 from olx_monitor.dedupe import Store
 from olx_monitor.enrichment import SellerEnricher
 from olx_monitor.logging_setup import configurar_logging
@@ -59,7 +59,15 @@ def main() -> None:
     if removidos:
         logger.info("Limpeza do banco: %d registro(s) antigo(s) removido(s).", removidos)
 
-    notifier = TelegramNotifier(config.telegram.token, config.telegram.chat_id)
+    # Sempre criado, mesmo que o monitor de cupons esteja desativado —
+    # é só um objeto em memória, custo zero. Se nunca for escrito (ver
+    # abaixo), fica vazio pra sempre e a seção de cupom simplesmente
+    # nunca aparece nas notificações — sem exigir que o monitor de
+    # cupons exista.
+    latest_coupon_cache = LatestCouponCache()
+    notifier = TelegramNotifier(
+        config.telegram.token, config.telegram.chat_id, latest_coupon_cache=latest_coupon_cache
+    )
 
     # Worker global de enriquecimento (dados do vendedor) — uma fila +
     # uma thread + um browser Playwright dedicado, compartilhados entre
@@ -100,6 +108,7 @@ def main() -> None:
             notifier=notifier,
             store=store,
             stop_event=stop_event,
+            latest_coupon_cache=latest_coupon_cache,
         )
         thread_cupons = threading.Thread(
             target=cupom_monitor.run_forever, name="monitor-cupons", daemon=True

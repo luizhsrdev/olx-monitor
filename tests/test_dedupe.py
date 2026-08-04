@@ -122,8 +122,12 @@ def test_limpar_antigos_preserva_registros_recentes(store):
 
 
 # --- Dedupe de cupons — tabela própria (cupons_vistos), desacoplada de
-# Anuncio/Coupon: Store só lida com strings de código, quem monta o
-# Coupon é coupon_monitor.py. ------------------------------------------
+# Anuncio/Coupon: Store só lida com tuplas (codigo, categoria_id), quem
+# monta o Coupon é coupon_monitor.py.
+#
+# Chave composta, não só código: descoberto com dado real que o mesmo
+# código de cupom (ex. "TECH5") pode valer pra várias categorias ao
+# mesmo tempo, cada uma como um cartão próprio na página. -------------
 
 
 def test_cupons_primeira_execucao_true_quando_banco_vazio(store):
@@ -131,38 +135,49 @@ def test_cupons_primeira_execucao_true_quando_banco_vazio(store):
 
 
 def test_cupons_primeira_execucao_false_apos_marcar_vistos(store):
-    store.marcar_codigos_vistos(["OFF30"])
+    store.marcar_cupons_vistos([("OFF30", "-1")])
 
     assert store.eh_primeira_execucao_cupons() is False
 
 
-def test_cupons_codigos_novos_exclui_ja_vistos(store):
-    store.marcar_codigos_vistos(["OFF30"])
+def test_cupons_novos_exclui_ja_vistos(store):
+    store.marcar_cupons_vistos([("OFF30", "-1")])
 
-    novos = store.codigos_novos(["OFF30", "PROMO5"])
+    novos = store.cupons_novos([("OFF30", "-1"), ("PROMO5", "-1")])
 
-    assert novos == ["PROMO5"]
-
-
-def test_cupons_codigos_novos_nao_marca_nada_sozinho(store):
-    store.codigos_novos(["OFF30"])
-
-    assert store.codigos_novos(["OFF30"]) == ["OFF30"]
+    assert novos == [("PROMO5", "-1")]
 
 
-def test_cupons_codigos_novos_preserva_ordem(store):
-    store.marcar_codigos_vistos(["B"])
+def test_cupons_novos_nao_marca_nada_sozinho(store):
+    store.cupons_novos([("OFF30", "-1")])
 
-    novos = store.codigos_novos(["A", "B", "C"])
-
-    assert novos == ["A", "C"]
+    assert store.cupons_novos([("OFF30", "-1")]) == [("OFF30", "-1")]
 
 
-def test_cupons_marcar_codigos_vistos_e_idempotente(store):
-    store.marcar_codigos_vistos(["OFF30"])
-    store.marcar_codigos_vistos(["OFF30"])  # não deve levantar erro
+def test_cupons_novos_preserva_ordem(store):
+    store.marcar_cupons_vistos([("B", "-1")])
 
-    assert store.codigos_novos(["OFF30"]) == []
+    novos = store.cupons_novos([("A", "-1"), ("B", "-1"), ("C", "-1")])
+
+    assert novos == [("A", "-1"), ("C", "-1")]
+
+
+def test_marcar_cupons_vistos_e_idempotente(store):
+    store.marcar_cupons_vistos([("OFF30", "-1")])
+    store.marcar_cupons_vistos([("OFF30", "-1")])  # não deve levantar erro
+
+    assert store.cupons_novos([("OFF30", "-1")]) == []
+
+
+def test_cupons_mesmo_codigo_categoria_diferente_e_novo(store):
+    # Regressão do bug real encontrado: "TECH5" visto na categoria 3000
+    # não pode suprimir a notificação de "TECH5" numa categoria 16000
+    # nunca vista antes — são cartões/ofertas diferentes.
+    store.marcar_cupons_vistos([("TECH5", "3000")])
+
+    novos = store.cupons_novos([("TECH5", "3000"), ("TECH5", "16000")])
+
+    assert novos == [("TECH5", "16000")]
 
 
 def test_cupons_dedupe_e_independente_do_dedupe_de_anuncios(store):
@@ -170,11 +185,11 @@ def test_cupons_dedupe_e_independente_do_dedupe_de_anuncios(store):
     # um no outro — tabelas completamente separadas.
     store.marcar_vistos("Monitor A", [_anuncio("OFF30")])
 
-    assert store.codigos_novos(["OFF30"]) == ["OFF30"]
+    assert store.cupons_novos([("OFF30", "-1")]) == [("OFF30", "-1")]
 
 
 def test_limpar_antigos_tambem_remove_cupons_expirados(store):
-    store.marcar_codigos_vistos(["OFF30"])
+    store.marcar_cupons_vistos([("OFF30", "-1")])
 
     antigo = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
     with store._lock:
@@ -188,3 +203,29 @@ def test_limpar_antigos_tambem_remove_cupons_expirados(store):
 
     assert removidos == 1
     assert store.eh_primeira_execucao_cupons() is True
+
+
+def test_migracao_schema_antigo_de_cupons_e_transparente(tmp_path: Path):
+    # Simula um banco criado antes da chave composta (só "codigo" como
+    # PRIMARY KEY) — Store precisa recriar a tabela sem quebrar, não
+    # propagar um erro de schema.
+    import sqlite3
+
+    caminho = tmp_path / "antigo.db"
+    conexao_crua = sqlite3.connect(str(caminho))
+    conexao_crua.execute(
+        "CREATE TABLE cupons_vistos (codigo TEXT PRIMARY KEY, visto_em TEXT NOT NULL)"
+    )
+    conexao_crua.execute(
+        "INSERT INTO cupons_vistos VALUES ('ANTIGO', '2020-01-01T00:00:00+00:00')"
+    )
+    conexao_crua.commit()
+    conexao_crua.close()
+
+    s = Store(caminho)
+    try:
+        assert s.eh_primeira_execucao_cupons() is True  # tabela antiga foi descartada
+        s.marcar_cupons_vistos([("NOVO", "-1")])
+        assert s.cupons_novos([("NOVO", "-1")]) == []
+    finally:
+        s.close()

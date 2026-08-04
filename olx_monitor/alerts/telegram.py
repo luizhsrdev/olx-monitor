@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import requests
@@ -13,7 +14,7 @@ if TYPE_CHECKING:
     # import só pra tipagem estática: em runtime, coupon_monitor.py
     # importa TelegramNotifier daqui — um import de verdade (não só
     # sob TYPE_CHECKING) criaria um ciclo.
-    from ..coupon_monitor import Coupon
+    from ..coupon_monitor import Coupon, LatestCouponCache
 
 logger = logging.getLogger(__name__)
 
@@ -46,17 +47,36 @@ class TelegramNotifier:
     que se perde o anúncio pra outro comprador). `update()` edita essa
     mesma mensagem depois via `editMessageText`, quando/se os dados do
     vendedor chegarem (ver `enrichment.py`).
+
+    `latest_coupon_cache`, se fornecido, é consultado (leitura em
+    memória, instantânea — nenhuma requisição nova) tanto em `send()`
+    quanto em `update()` pra anexar o cupom mais em destaque no momento
+    à notificação de anúncio. Injeção explícita, não import de estado
+    global — com `None` (o padrão), a seção de cupom simplesmente nunca
+    aparece, sem exigir que exista um `CouponMonitor` rodando (nem em
+    testes, nem se `cupons.ativo: false`).
     """
 
-    def __init__(self, token: str, chat_id: str, timeout_segundos: int = 10):
+    def __init__(
+        self,
+        token: str,
+        chat_id: str,
+        timeout_segundos: int = 10,
+        latest_coupon_cache: "LatestCouponCache | None" = None,
+    ):
         self._url_send = f"https://api.telegram.org/bot{token}/sendMessage"
         self._url_edit = f"https://api.telegram.org/bot{token}/editMessageText"
         self._chat_id = chat_id
         self._timeout_segundos = timeout_segundos
+        self._latest_coupon_cache = latest_coupon_cache
 
     def send(self, anuncio: Anuncio, monitor_nome: str, termos_prioritarios: list[str]) -> str | None:
-        texto = _montar_corpo(anuncio, monitor_nome, termos_prioritarios) + (
-            "\n\n⏳ Buscando dados do vendedor..."
+        texto = _montar_texto_anuncio(
+            anuncio,
+            monitor_nome,
+            termos_prioritarios,
+            self._obter_cupom_em_cache(),
+            "⏳ Buscando dados do vendedor...",
         )
         resposta = self._chamar_api(self._url_send, {"text": texto})
 
@@ -77,13 +97,18 @@ class TelegramNotifier:
         termos_prioritarios: list[str],
         seller_info: SellerInfo | None,
     ) -> None:
-        corpo = _montar_corpo(anuncio, monitor_nome, termos_prioritarios)
         bloco_vendedor = (
             _montar_bloco_vendedor(seller_info)
             if seller_info is not None
             else "👤 Dados do vendedor indisponíveis"
         )
-        texto = f"{corpo}\n\n{bloco_vendedor}"
+        texto = _montar_texto_anuncio(
+            anuncio,
+            monitor_nome,
+            termos_prioritarios,
+            self._obter_cupom_em_cache(),
+            bloco_vendedor,
+        )
 
         try:
             message_id_int = int(message_id)
@@ -100,6 +125,11 @@ class TelegramNotifier:
             # send()) já é válida e completa sem o enriquecimento —
             # só loga e segue, sem retry.
             logger.warning("olx: falha ao editar mensagem %s: %s", message_id, exc)
+
+    def _obter_cupom_em_cache(self) -> "Coupon | None":
+        if self._latest_coupon_cache is None:
+            return None
+        return self._latest_coupon_cache.obter()
 
     def send_coupon(self, coupon: "Coupon") -> None:
         """Notifica um cupom novo. Sem message_id/update — cupom não
@@ -126,6 +156,24 @@ class TelegramNotifier:
             # aparecer num traceback logado.
             raise TelegramSendError(_mensagem_erro_sanitizada(exc)) from None
         return resposta
+
+
+def _montar_texto_anuncio(
+    anuncio: Anuncio,
+    monitor_nome: str,
+    termos_prioritarios: list[str],
+    cupom: "Coupon | None",
+    bloco_final: str,
+) -> str:
+    """Monta o texto completo de uma notificação de anúncio: corpo +
+    seção de cupom (se houver um em cache) + o bloco que muda entre
+    send() (aviso de "buscando vendedor") e update() (dados do vendedor
+    ou "indisponível")."""
+    partes = [_montar_corpo(anuncio, monitor_nome, termos_prioritarios)]
+    if cupom is not None:
+        partes.append(_montar_secao_cupom_anexado(cupom))
+    partes.append(bloco_final)
+    return "\n\n".join(partes)
 
 
 def _montar_corpo(anuncio: Anuncio, monitor_nome: str, termos_prioritarios: list[str]) -> str:
@@ -187,9 +235,27 @@ def _montar_mensagem_cupom(coupon: "Coupon") -> str:
         linhas.append(f"💸 {html.escape(coupon.titulo)}")
     if coupon.descricao:
         linhas.append(f"📋 {html.escape(coupon.descricao)}")
-    if coupon.validade:
-        linhas.append(f"⏰ {html.escape(coupon.validade)}")
+    validade = _formatar_expira_em(coupon.expira_em)
+    if validade:
+        linhas.append(f"⏰ {html.escape(validade)}")
     return "\n".join(linhas)
+
+
+def _montar_secao_cupom_anexado(coupon: "Coupon") -> str:
+    """Seção curta anexada a uma notificação de anúncio — só código +
+    título, sem descrição/validade, pra não competir em tamanho com a
+    notificação principal (quem quiser detalhe do cupom recebeu a
+    mensagem própria dele via send_coupon())."""
+    linhas = [f"🎟️ Cupom disponível: <code>{html.escape(coupon.codigo)}</code>"]
+    if coupon.titulo:
+        linhas.append(f"💸 {html.escape(coupon.titulo)}")
+    return "\n".join(linhas)
+
+
+def _formatar_expira_em(expira_em: datetime | None) -> str | None:
+    if expira_em is None:
+        return None
+    return f"Expira em {expira_em.strftime('%d/%m/%Y %H:%M')} UTC"
 
 
 def _mensagem_erro_sanitizada(exc: requests.RequestException) -> str:

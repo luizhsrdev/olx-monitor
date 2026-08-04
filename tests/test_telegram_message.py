@@ -8,11 +8,25 @@ import requests
 from olx_monitor.alerts.telegram import (
     TelegramNotifier,
     TelegramSendError,
+    _formatar_expira_em,
     _montar_bloco_vendedor,
     _montar_corpo,
+    _montar_secao_cupom_anexado,
 )
+from olx_monitor.coupon_monitor import Coupon, LatestCouponCache
 from olx_monitor.models import Anuncio
 from olx_monitor.seller_info import SellerInfo
+
+
+def _cupom(codigo="OFF30", titulo="R$30 de desconto com Garantia da OLX") -> Coupon:
+    return Coupon(
+        codigo=codigo,
+        titulo=titulo,
+        descricao="Válido para compras entre R$400 e R$20000",
+        categoria_id="-1",
+        expira_em=None,
+        coletado_em=datetime.now(timezone.utc),
+    )
 
 
 def _anuncio(titulo="PS5 Digital Slim 1TB", preco=2789.0, local="Jundiaí - SP") -> Anuncio:
@@ -131,6 +145,104 @@ def test_bloco_vendedor_sem_nenhum_dado_usa_texto_alternativo():
     texto = _montar_bloco_vendedor(SellerInfo())
 
     assert texto == "👤 Dados do vendedor indisponíveis"
+
+
+# --- Seção de cupom anexado à notificação de anúncio -------------------
+
+
+def test_secao_cupom_anexado_contem_codigo_em_bloco_code():
+    texto = _montar_secao_cupom_anexado(_cupom())
+
+    assert "🎟️ Cupom disponível: <code>OFF30</code>" in texto
+    assert "💸 R$30 de desconto com Garantia da OLX" in texto
+
+
+def test_secao_cupom_anexado_sem_titulo_mostra_so_o_codigo():
+    texto = _montar_secao_cupom_anexado(_cupom(titulo=None))
+
+    assert texto == "🎟️ Cupom disponível: <code>OFF30</code>"
+
+
+def test_secao_cupom_anexado_escapa_html():
+    texto = _montar_secao_cupom_anexado(_cupom(codigo="A<B", titulo="<script>x</script>"))
+
+    assert "<script>" not in texto
+    assert "&lt;script&gt;" in texto
+
+
+def test_formatar_expira_em_none_retorna_none():
+    assert _formatar_expira_em(None) is None
+
+
+def test_formatar_expira_em_formata_data_em_utc():
+    dt = datetime(2026, 8, 4, 2, 59, tzinfo=timezone.utc)
+
+    assert _formatar_expira_em(dt) == "Expira em 04/08/2026 02:59 UTC"
+
+
+# --- send()/update(): cupom em cache anexado à notificação de anúncio --
+#
+# Três cenários pedidos: com cupom em cache, sem cupom em cache (cache
+# existe mas está vazio), e monitor de cupons desativado (nenhum cache
+# foi passado pro TelegramNotifier).
+
+
+def test_send_com_cupom_em_cache_anexa_secao_de_cupom():
+    cache = LatestCouponCache()
+    cache.atualizar(_cupom())
+    notifier = TelegramNotifier(token="123:ABC", chat_id="1", latest_coupon_cache=cache)
+
+    with patch("olx_monitor.alerts.telegram.requests.post") as mock_post:
+        mock_post.return_value = _resposta_ok()
+        notifier.send(_anuncio(), "PS5 revenda", [])
+
+    texto = mock_post.call_args.kwargs["json"]["text"]
+    assert "🎟️ Cupom disponível: <code>OFF30</code>" in texto
+    # convive com o aviso de enriquecimento de vendedor, não substitui
+    assert "⏳ Buscando dados do vendedor..." in texto
+
+
+def test_send_com_cache_vazio_nao_anexa_secao_de_cupom():
+    cache = LatestCouponCache()  # existe, mas nunca foi populado
+    notifier = TelegramNotifier(token="123:ABC", chat_id="1", latest_coupon_cache=cache)
+
+    with patch("olx_monitor.alerts.telegram.requests.post") as mock_post:
+        mock_post.return_value = _resposta_ok()
+        notifier.send(_anuncio(), "PS5 revenda", [])
+
+    texto = mock_post.call_args.kwargs["json"]["text"]
+    assert "Cupom disponível" not in texto
+
+
+def test_send_sem_monitor_de_cupons_configurado_funciona_sem_erro():
+    # Nenhum LatestCouponCache foi passado (parâmetro usa o default
+    # None) — simula cupons.ativo: false, ou o monitor de cupons nem
+    # existindo. Não deve levantar erro nem exigir nada extra.
+    notifier = TelegramNotifier(token="123:ABC", chat_id="1")
+
+    with patch("olx_monitor.alerts.telegram.requests.post") as mock_post:
+        mock_post.return_value = _resposta_ok()
+        notifier.send(_anuncio(), "PS5 revenda", [])
+
+    texto = mock_post.call_args.kwargs["json"]["text"]
+    assert "Cupom disponível" not in texto
+
+
+def test_update_tambem_anexa_cupom_em_cache():
+    # A seção de cupom precisa sobreviver à edição da mensagem com os
+    # dados do vendedor — update() reconstrói o texto inteiro, então
+    # precisa consultar o cache de novo, não só send().
+    cache = LatestCouponCache()
+    cache.atualizar(_cupom())
+    notifier = TelegramNotifier(token="123:ABC", chat_id="1", latest_coupon_cache=cache)
+
+    with patch("olx_monitor.alerts.telegram.requests.post") as mock_post:
+        mock_post.return_value = _resposta_ok()
+        notifier.update("777", _anuncio(), "PS5 revenda", [], SellerInfo(nome="Gabriel"))
+
+    texto = mock_post.call_args.kwargs["json"]["text"]
+    assert "🎟️ Cupom disponível: <code>OFF30</code>" in texto
+    assert "👤 Vendedor: Gabriel" in texto
 
 
 # --- send(): mensagem inicial com "buscando vendedor" + message_id -----

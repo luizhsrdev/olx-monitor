@@ -351,30 +351,80 @@ Mensagem no Telegram (código em bloco `<code>` — toca pra copiar):
 OFF30
 💸 R$30 de desconto com Garantia da OLX
 📋 Válido para compras entre R$400 e R$20000 utilizando Garantia OLX
-⏰ Expira em menos de 24 horas
+⏰ Expira em 04/08/2026 02:59 UTC
 ```
 
-**A página de cupons usa HTML renderizado puro, não RSC** (confirmado: zero
-`self.__next_f.push` nela — diferente da listagem de anúncios). Cada cupom
-fica dentro de um `<div class="... CouponCard_wrapper__<hash>">` (hash de
-build do CSS Modules, muda só quando a OLX reimplanta o frontend — só o
-prefixo estável é usado pra extrair). Campos confirmados contra uma amostra
-real: código (`<p class="...uppercase">`), título (`<h2
-class="...CouponCard_title__...">`), descrição (`<p class="typo-caption
-undefined">` logo após o título) e validade (`<p class="typo-caption"
-color="...">` no rodapé do cartão).
+**A página de cupons usa RSC**, igual à listagem de anúncios. Uma suposição
+inicial (baseada numa amostra com um único cupom) achou que era só HTML
+renderizado sem RSC — se mostrou errada assim que uma amostra real com vários
+cupons apareceu: os dados vêm num chunk `self.__next_f.push`, num elemento
+React com um array de objetos `{"coupon","title","description","expiresAt",
+"categoryId",...}` — dado estruturado de verdade, não texto pra raspar de
+classe CSS. `coupon_monitor.py` usa o mesmo scanner recursivo genérico já
+usado pra anúncios (não fixa caminho tipo `data`/`$L18`, só a "cara" do item:
+tem `coupon` + título/descrição). O parser antigo via HTML renderizado
+(`CouponCard_wrapper__...`) foi mantido como **fallback legado**, tentado só
+se o RSC não render nada.
 
-**Ressalva:** a amostra real inspecionada tinha só **um cupom** na página —
-a extração de campos foi validada contra dado real, mas o corte entre
-*múltiplos* `CouponCard_wrapper__` consecutivos só foi exercitado com um
-fragmento sintético (`tests/test_coupon_monitor.py`), não com um dump real
-de vários cupons. Por isso `coupon_monitor.py` salva um `debug_cupons.html`
-automaticamente sempre que a extração vier vazia ou a contagem parecer
-suspeita (algum cartão sem código, ou dois cupons com o mesmo código — sinal
-de que o corte vazou conteúdo de um pro outro). No dia que a página tiver
-vários cupons de verdade, esse arquivo permite validar o corte contra dado
-real e corrigir rápido se precisar — mesmo ciclo já usado pro `__NEXT_DATA__`
-e pros dados do vendedor.
+**Achado importante:** o mesmo código de cupom pode valer pra várias
+categorias ao mesmo tempo — uma amostra real tinha `"TECH5"` repetido em 6
+cartões (Celulares, Games, Áudio, ...), cada um com título/`categoryId`
+próprios. Por isso o dedupe usa chave composta `(codigo, categoria_id)`, não
+só o código — com chave simples, a primeira categoria vista "consumia" o
+dedupe e categorias novas com o mesmo código nunca mais notificavam. Um
+banco criado antes dessa mudança é migrado automaticamente na primeira
+conexão (a tabela antiga é recriada — dedupe de cupom é dado efêmero, perder
+o histórico não é grave: pior caso, um cupom já visto notifica de novo uma
+vez).
+
+`coupon_monitor.py` salva um `debug_cupons.html` automaticamente sempre que
+a extração vier vazia ou a contagem parecer suspeita (dois cupons com a
+mesma chave composta) — mesmo mecanismo já usado pro `__NEXT_DATA__` e pros
+dados do vendedor.
+
+### Cupom anexado às notificações de anúncio
+
+Toda notificação de anúncio (produto) inclui, quando disponível, o cupom
+mais em destaque no momento na página de cupons — pra dar pra aplicar
+desconto sem checar a aba de cupons separadamente:
+
+```
+🔥 PRIORITÁRIO (lacrado, 1tb)
+PS5 Digital Slim 1TB
+💰 R$ 2.789,00
+📍 Jundiaí - SP
+🔎 Monitor: PS5 revenda
+🔗 Ver anúncio
+
+🎟️ Cupom disponível: OFF30
+💸 R$30 de desconto com Garantia da OLX
+
+⏳ Buscando dados do vendedor...
+```
+
+Como funciona:
+
+- `CouponMonitor` mantém, em memória, o **primeiro cupom da lista que ainda
+  não expirou** (`LatestCouponCache`, um objeto simples protegido por lock —
+  sem banco novo, é dado efêmero: reinicia vazio se o processo cair, até o
+  próximo ciclo do monitor de cupons rodar). "Primeiro da lista" é a ordem de
+  prioridade da própria OLX, não recência de publicação de verdade — a API
+  não expõe quando um cupom foi criado, só quando expira (`expiresAt`).
+- Antes de colocar um cupom no cache, `CouponMonitor` confere se `expira_em`
+  já passou (comparando com o horário atual) — evita anexar um cupom morto
+  numa notificação por atraso ou inconsistência da página, mesmo que a
+  página normalmente só liste cupons válidos. Se a lista vier vazia ou todos
+  os cupons estiverem expirados, o cache vira `None` — sem cupom fantasma
+  grudado.
+- `TelegramNotifier` recebe o `LatestCouponCache` **injetado no construtor**
+  (não importa estado global de outro módulo) — com `None` (o padrão), a
+  seção de cupom simplesmente nunca aparece, sem exigir que o monitor de
+  cupons exista nem rodando nem em teste.
+- É só leitura de um valor já em memória — nenhuma requisição de rede nova
+  acontece ao montar a notificação de anúncio, e nada atrasa por causa disso.
+- A seção de cupom aparece tanto na notificação inicial (`send()`) quanto na
+  edição com dados do vendedor (`update()`) — são features independentes que
+  coexistem na mesma mensagem.
 
 ## Testes
 

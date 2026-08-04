@@ -18,13 +18,21 @@ CREATE TABLE IF NOT EXISTS anuncios_vistos (
 """
 
 # Tabela própria para o dedupe de cupons — deliberadamente separada de
-# anuncios_vistos (cupom não é anúncio, não tem monitor_nome/fonte, só
-# um código). Mesma conexão/lock/arquivo .db, infraestrutura reutilizada
-# sem forçar o cupom na forma do Anuncio.
+# anuncios_vistos (cupom não é anúncio, não tem monitor_nome/fonte).
+# Mesma conexão/lock/arquivo .db, infraestrutura reutilizada sem forçar
+# o cupom na forma do Anuncio.
+#
+# Chave composta (codigo, categoria_id): descobrimos com dado real que
+# o mesmo código de cupom (ex. "TECH5") pode valer pra várias categorias
+# diferentes ao mesmo tempo, cada uma com seu próprio card na página.
+# Com só "codigo" como chave, a primeira categoria vista "consumia" o
+# dedupe e categorias novas com o mesmo código nunca mais notificavam.
 _SCHEMA_CUPONS = """
 CREATE TABLE IF NOT EXISTS cupons_vistos (
-    codigo TEXT NOT NULL PRIMARY KEY,
-    visto_em TEXT NOT NULL
+    codigo TEXT NOT NULL,
+    categoria_id TEXT NOT NULL,
+    visto_em TEXT NOT NULL,
+    PRIMARY KEY (codigo, categoria_id)
 );
 """
 
@@ -43,8 +51,29 @@ class Store:
         self._lock = threading.Lock()
         with self._lock:
             self._conexao.execute(_SCHEMA)
+            self._migrar_schema_cupons_se_necessario()
             self._conexao.execute(_SCHEMA_CUPONS)
             self._conexao.commit()
+
+    def _migrar_schema_cupons_se_necessario(self) -> None:
+        """cupons_vistos mudou de chave simples (codigo) pra composta
+        (codigo, categoria_id). Um banco criado antes dessa mudança tem
+        a tabela antiga, sem a coluna categoria_id — INSERT/SELECT
+        contra o schema novo quebrariam nela. Dedupe de cupom é dado
+        efêmero e de baixo risco perder (pior caso: um cupom já visto
+        notifica de novo uma vez após o upgrade), então é mais simples
+        recriar a tabela do que migrar linha a linha. Deve ser chamado
+        dentro do lock, antes de CREATE TABLE IF NOT EXISTS."""
+        cursor = self._conexao.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='cupons_vistos'"
+        )
+        if cursor.fetchone() is None:
+            return  # tabela não existe ainda, nada pra migrar
+        colunas = {
+            row[1] for row in self._conexao.execute("PRAGMA table_info(cupons_vistos)")
+        }
+        if "categoria_id" not in colunas:
+            self._conexao.execute("DROP TABLE cupons_vistos")
 
     def eh_primeira_execucao(self, monitor_nome: str) -> bool:
         """True se este monitor nunca teve nenhum anúncio registrado —
@@ -94,28 +123,38 @@ class Store:
             cursor = self._conexao.execute("SELECT 1 FROM cupons_vistos LIMIT 1")
             return cursor.fetchone() is None
 
-    def codigos_novos(self, codigos: list[str]) -> list[str]:
-        """Retorna, preservando a ordem, os códigos que ainda não estão
-        registrados. Não marca nada como visto."""
-        if not codigos:
-            return []
-        placeholders = ",".join("?" * len(codigos))
-        with self._lock:
-            cursor = self._conexao.execute(
-                f"SELECT codigo FROM cupons_vistos WHERE codigo IN ({placeholders})",
-                codigos,
-            )
-            vistos = {row[0] for row in cursor.fetchall()}
-        return [c for c in codigos if c not in vistos]
+    def cupons_novos(self, chaves: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """`chaves` é uma lista de (codigo, categoria_id). Retorna,
+        preservando a ordem, as que ainda não estão registradas. Não
+        marca nada como visto.
 
-    def marcar_codigos_vistos(self, codigos: list[str]) -> None:
-        if not codigos:
+        Consulta uma chave por vez em vez de um IN batelado: o volume
+        de cupons por ciclo é sempre pequeno (unidades), e SQLite não
+        tem uma forma simples/portável de IN com tuplas — não vale a
+        complexidade de montar isso na mão."""
+        if not chaves:
+            return []
+        with self._lock:
+            vistas = set()
+            for codigo, categoria_id in chaves:
+                cursor = self._conexao.execute(
+                    "SELECT 1 FROM cupons_vistos WHERE codigo = ? AND categoria_id = ?",
+                    (codigo, categoria_id),
+                )
+                if cursor.fetchone() is not None:
+                    vistas.add((codigo, categoria_id))
+        return [c for c in chaves if c not in vistas]
+
+    def marcar_cupons_vistos(self, chaves: list[tuple[str, str]]) -> None:
+        """`chaves` é uma lista de (codigo, categoria_id)."""
+        if not chaves:
             return
         agora = datetime.now(timezone.utc).isoformat()
         with self._lock:
             self._conexao.executemany(
-                "INSERT OR IGNORE INTO cupons_vistos (codigo, visto_em) VALUES (?, ?)",
-                [(codigo, agora) for codigo in codigos],
+                "INSERT OR IGNORE INTO cupons_vistos (codigo, categoria_id, visto_em) "
+                "VALUES (?, ?, ?)",
+                [(codigo, categoria_id, agora) for codigo, categoria_id in chaves],
             )
             self._conexao.commit()
 
